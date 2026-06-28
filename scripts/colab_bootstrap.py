@@ -46,6 +46,24 @@ from typing import Iterable
 
 ROOT_LOG = pathlib.Path("/var/log/vsp")
 ROOT_LOG.mkdir(parents=True, exist_ok=True)
+# `touch` empty log files so `!tail -f` in another cell doesn't error out
+# before the first process writes to them.
+for _name in ("api", "workers", "web", "minio", "tunnel-web", "tunnel-api"):
+    (ROOT_LOG / f"{_name}.log").touch(exist_ok=True)
+
+
+def port_open(host: str, port: int, timeout: float = 0.5) -> bool:
+    """True iff a TCP connect to host:port succeeds. Used in place of `ss`."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
 
 
 def say(msg: str) -> None:
@@ -232,21 +250,27 @@ def step_minio() -> None:
         run("curl -fsSLo /usr/local/bin/mc https://dl.min.io/client/mc/release/linux-amd64/mc")
         run("chmod +x /usr/local/bin/mc")
     pathlib.Path("/var/lib/minio").mkdir(parents=True, exist_ok=True)
-    # If a MinIO is already running, leave it.
-    already = subprocess.run("ss -ltn | grep -q ':9000 '", shell=True).returncode == 0
-    if not already:
+    if not port_open("127.0.0.1", 9000):
         background(
             "minio",
             "minio server /var/lib/minio --console-address :9001",
             env={"MINIO_ROOT_USER": "minioadmin", "MINIO_ROOT_PASSWORD": "minioadmin"},
         )
+        # MinIO is "up" when /minio/health/ready returns 200 AND the port
+        # accepts TCP. Belt + suspenders.
         wait_for(
-            lambda: subprocess.run(
-                "curl -fsS http://127.0.0.1:9000/minio/health/ready",
-                shell=True, capture_output=True,
+            lambda: port_open("127.0.0.1", 9000) and subprocess.run(
+                "curl -fsS -o /dev/null http://127.0.0.1:9000/minio/health/ready",
+                shell=True,
             ).returncode == 0,
-            timeout=20, what="minio",
+            timeout=45,
+            every=1,
+            what="minio :9000",
         )
+        ok("minio ready")
+    else:
+        ok("minio already running on :9000")
+
     run("mc alias set local http://127.0.0.1:9000 minioadmin minioadmin", check=False)
     for bucket in ("vsp-originals", "vsp-hls", "vsp-thumbs", "vsp-exports"):
         run(f"mc mb -p local/{bucket}", check=False)
@@ -272,19 +296,32 @@ def step_cloudflared() -> None:
 def step_clone(repo: str | None) -> pathlib.Path:
     say("repository")
     if repo is None:
-        # Assume we're already in the repo root.
+        # 1) Already inside a checkout?
         cwd = pathlib.Path.cwd()
-        if not (cwd / "pnpm-workspace.yaml").exists():
-            raise SystemExit(
-                "No --repo given and the current directory isn't a VSP repo "
-                "(no pnpm-workspace.yaml). Pass --repo or `cd` into it first."
-            )
-        ok(f"using existing checkout at {cwd}")
-        return cwd
+        if (cwd / "pnpm-workspace.yaml").exists():
+            ok(f"using existing checkout at {cwd}")
+            return cwd
+
+        # 2) Auto-discover a sibling checkout under /content.
+        for cand in (
+            pathlib.Path("/content/Video-Previewer"),
+            pathlib.Path("/content/vsp"),
+        ):
+            if (cand / "pnpm-workspace.yaml").exists():
+                os.chdir(cand)
+                ok(f"auto-discovered checkout at {cand} (cd'd in)")
+                return cand
+
+        raise SystemExit(
+            "No --repo given and no existing checkout found.\n"
+            "  Either pass --repo <git-url>, or clone the repo first:\n"
+            "    !git clone https://github.com/<user>/<repo>.git /content/Video-Previewer"
+        )
+
     target = pathlib.Path("/content") / pathlib.Path(repo.rstrip("/").split("/")[-1]).stem
     if target.exists() and (target / ".git").exists():
         ok(f"already cloned at {target}; pulling")
-        run("git pull --ff-only", cwd=str(target), check=False)
+        run("git -C %s pull --ff-only" % target, check=False)
     else:
         run(f"git clone --depth=1 {repo} {target}")
     os.chdir(target)
@@ -430,15 +467,21 @@ def step_start_services() -> None:
     background("workers", "pnpm --filter @vsp/workers dev")
     background("web",     "pnpm --filter @vsp/web dev")
 
-    # Wait for the three listeners.
-    def listening(port: int) -> bool:
-        return subprocess.run(f"ss -ltn | grep -q ':{port} '", shell=True).returncode == 0
-
     say("waiting for ports 4000 (api) and 3000 (web) to listen")
-    wait_for(lambda: listening(4000), timeout=120, every=2, what="api on :4000")
-    ok("api up")
-    wait_for(lambda: listening(3000), timeout=180, every=2, what="web on :3000")
-    ok("web up")
+    try:
+        wait_for(lambda: port_open("127.0.0.1", 4000), timeout=180, every=2, what="api :4000")
+        ok("api up")
+    except SystemExit:
+        warn("api never bound :4000 — last 80 lines of its log:")
+        run("tail -n 80 /var/log/vsp/api.log", check=False)
+        raise
+    try:
+        wait_for(lambda: port_open("127.0.0.1", 3000), timeout=240, every=2, what="web :3000")
+        ok("web up")
+    except SystemExit:
+        warn("web never bound :3000 — last 80 lines of its log:")
+        run("tail -n 80 /var/log/vsp/web.log", check=False)
+        raise
 
 
 def step_tunnels() -> tuple[str, str]:
@@ -465,6 +508,10 @@ def step_tunnels() -> tuple[str, str]:
 
 def step_rewire(web_url: str, api_url: str) -> None:
     say("rewiring env to public URLs and restarting web + api")
+
+    def listening(port: int) -> bool:
+        return port_open("127.0.0.1", port)
+
     env_path = pathlib.Path(".env")
     text = env_path.read_text()
     for key, val in (("APP_URL", web_url), ("API_URL", api_url),
@@ -482,11 +529,8 @@ def step_rewire(web_url: str, api_url: str) -> None:
     background("api", "pnpm --filter @vsp/api dev")
     background("web", "pnpm --filter @vsp/web dev")
 
-    def listening(port: int) -> bool:
-        return subprocess.run(f"ss -ltn | grep -q ':{port} '", shell=True).returncode == 0
-
-    wait_for(lambda: listening(4000), timeout=120, every=2, what="api restart")
-    wait_for(lambda: listening(3000), timeout=180, every=2, what="web restart")
+    wait_for(lambda: listening(4000), timeout=180, every=2, what="api restart")
+    wait_for(lambda: listening(3000), timeout=240, every=2, what="web restart")
     ok("api + web restarted")
 
 
@@ -547,6 +591,9 @@ def main() -> None:
     if os.geteuid() != 0:
         warn("not running as root; if apt/install steps fail, try `!sudo python3 …`")
 
+    # iproute2 ships `ss`; psmisc ships `pkill`; net-tools is occasionally
+    # missing on slim images. Cheap belt-and-braces.
+    step_apt(["iproute2", "psmisc", "net-tools"])
     step_node_and_pnpm()
     step_postgres()
     step_redis()
