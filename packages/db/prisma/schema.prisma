@@ -8,7 +8,9 @@
 
 generator client {
   provider        = "prisma-client-js"
-  previewFeatures = ["fullTextSearchPostgres", "postgresqlExtensions", "views"]
+  // `fullTextSearch` covers Postgres tsvector queries on Prisma 5.x;
+  // the renamed `fullTextSearchPostgres` only exists on 6.x previews.
+  previewFeatures = ["fullTextSearch", "postgresqlExtensions", "views"]
 }
 
 datasource db {
