@@ -1,0 +1,14 @@
+**/node_modules
+**/.next
+**/dist
+**/coverage
+**/.turbo
+**/.git
+**/.env.local
+**/.env.*.local
+.git
+.github
+docs
+infra/k8s
+infra/terraform
+*.md

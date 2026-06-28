@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vsp-workers
+  namespace: vsp
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: vsp-workers }
+  template:
+    metadata:
+      labels: { app: vsp-workers }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: workers
+          image: ghcr.io/your-org/vsp-workers:latest
+          envFrom:
+            - secretRef: { name: vsp-secrets }
+            - configMapRef: { name: vsp-config }
+          resources:
+            # Transcode pegs a core hot; rooms for two concurrent ffmpeg processes.
+            requests: { cpu: 1500m, memory: 1.5Gi }
+            limits:   { cpu: 4,     memory: 4Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false  # ffmpeg writes to /tmp
+            capabilities: { drop: ['ALL'] }
+          volumeMounts:
+            - { name: scratch, mountPath: /tmp }
+      volumes:
+        - name: scratch
+          emptyDir: { sizeLimit: 50Gi }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vsp-workers
+  namespace: vsp
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vsp-workers
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 75 } }

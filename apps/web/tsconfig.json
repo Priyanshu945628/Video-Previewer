@@ -1,0 +1,33 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "preserve",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "incremental": true,
+    "plugins": [{ "name": "next" }],
+    "paths": {
+      "@/*": ["./src/*"],
+      "@vsp/db": ["../../packages/db/src/index.ts"],
+      "@vsp/db/*": ["../../packages/db/src/*"],
+      "@vsp/contracts": ["../../packages/contracts/src/index.ts"],
+      "@vsp/contracts/*": ["../../packages/contracts/src/*"],
+      "@vsp/auth": ["../../packages/auth/src/index.ts"],
+      "@vsp/auth/*": ["../../packages/auth/src/*"],
+      "@vsp/ui": ["../../packages/ui/src/index.ts"],
+      "@vsp/ui/*": ["../../packages/ui/src/*"],
+      "@vsp/crypto": ["../../packages/crypto/src/index.ts"],
+      "@vsp/crypto/*": ["../../packages/crypto/src/*"],
+      "@vsp/config": ["../../packages/config/src/index.ts"],
+      "@vsp/config/*": ["../../packages/config/src/*"],
+      "@vsp/logger": ["../../packages/logger/src/index.ts"],
+      "@vsp/logger/*": ["../../packages/logger/src/*"],
+      "@vsp/player": ["../../packages/player/src/index.ts"],
+      "@vsp/player/*": ["../../packages/player/src/*"]
+    }
+  },
+  "include": ["next-env.d.ts", "src/**/*", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}

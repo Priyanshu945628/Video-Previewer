@@ -1,0 +1,30 @@
+# Non-secret runtime config. Secrets (DB url, JWT keys, S3 creds, Anthropic key)
+# live in vsp-secrets — create them out-of-band via External Secrets / SOPS.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vsp-config
+  namespace: vsp
+data:
+  NODE_ENV: production
+  LOG_LEVEL: info
+  ALLOWED_ORIGINS: 'https://vsp.app'
+  S3_REGION: auto
+  S3_BUCKET: vsp-prod
+  HLS_SEGMENT_SECONDS: '4'
+  AI_MODEL_TIER: standard
+---
+# Placeholder — replace via sealed-secrets / external-secrets in real deploys.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vsp-secrets
+  namespace: vsp
+type: Opaque
+stringData:
+  DATABASE_URL: postgresql://vsp:CHANGEME@postgres:5432/vsp
+  REDIS_URL: redis://redis:6379
+  JWT_SECRET: CHANGEME
+  S3_ACCESS_KEY: CHANGEME
+  S3_SECRET_KEY: CHANGEME
+  ANTHROPIC_API_KEY: CHANGEME

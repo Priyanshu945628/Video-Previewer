@@ -1,0 +1,32 @@
+{
+  "name": "@vsp/auth",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "clean": "rm -rf dist .turbo *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@auth/prisma-adapter": "^2.4.1",
+    "argon2": "^0.40.3",
+    "next-auth": "5.0.0-beta.20",
+    "otplib": "^12.0.1",
+    "qrcode": "^1.5.4",
+    "zod": "^3.23.8"
+  },
+  "peerDependencies": {
+    "@vsp/config": "workspace:*",
+    "@vsp/contracts": "workspace:*",
+    "@vsp/crypto": "workspace:*",
+    "@vsp/db": "workspace:*",
+    "@vsp/logger": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.5",
+    "typescript": "^5.5.4"
+  }
+}

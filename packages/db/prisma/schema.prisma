@@ -1,0 +1,907 @@
+// VSP — Database schema
+// Five invariants:
+//   1) Tenant isolation enforced by RLS, not just the app
+//   2) Versions are immutable, append-only
+//   3) Audit is append-only and hash-chained
+//   4) Hot/cold separation via month partitions on telemetry + audit
+//   5) Every hot-path query has a supporting index
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["fullTextSearchPostgres", "postgresqlExtensions", "views"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DATABASE_DIRECT_URL")
+  extensions = [pgcrypto, citext, pg_trgm]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WORKSPACE LAYER
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Workspace {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug         String   @unique @db.Citext
+  name         String
+  plan         Plan     @default(FREE)
+  billingEmail String?  @db.Citext
+  brandColor   String?  @db.VarChar(7)
+  logoKey      String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  deletedAt    DateTime?
+
+  members      WorkspaceMember[]
+  projects     Project[]
+  invitations  Invitation[]
+  limits       WorkspaceLimits?
+  usage        WorkspaceUsage[]
+  shareLinks   ShareLink[]
+  featureFlags FeatureFlag[]
+
+  @@index([deletedAt])
+  @@map("workspaces")
+}
+
+enum Plan {
+  FREE
+  PRO
+  STUDIO
+  ENTERPRISE
+}
+
+model WorkspaceMember {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId String        @db.Uuid
+  userId      String        @db.Uuid
+  role        WorkspaceRole
+  createdAt   DateTime      @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+  @@map("workspace_members")
+}
+
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  EDITOR
+  COLLABORATOR
+}
+
+model Invitation {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId String        @db.Uuid
+  email       String        @db.Citext
+  role        WorkspaceRole
+  tokenHash   String        @unique
+  invitedById String        @db.Uuid
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  createdAt   DateTime      @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invitedBy User      @relation(fields: [invitedById], references: [id])
+
+  @@index([workspaceId, email])
+  @@map("invitations")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IDENTITY LAYER (Auth.js-compatible)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id              String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email           String     @unique @db.Citext
+  emailVerifiedAt DateTime?
+  name            String?
+  image           String?
+  passwordHash    String?
+  status          UserStatus @default(ACTIVE)
+  locale          String     @default("en")
+  timezone        String     @default("UTC")
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  lastLoginAt     DateTime?
+  deletedAt       DateTime?
+
+  twoFactorEnabled     Boolean  @default(false)
+  enforceSingleSession Boolean  @default(false)
+  failedLoginCount     Int      @default(0)
+  lockedUntil          DateTime?
+
+  accounts        Account[]
+  sessions        Session[]
+  authenticators  Authenticator[]
+  memberships     WorkspaceMember[]
+  invitationsSent Invitation[]
+  projectsOwned   Project[]              @relation("ProjectOwner")
+  projectMemberOf ProjectMember[]
+  clientOf        ProjectClient[]
+  assetsUploaded  AssetVersion[]         @relation("UploadedBy")
+  comments        Comment[]
+  commentReactions CommentReaction[]
+  approvals       Approval[]
+  downloads       Download[]
+  notifications   Notification[]
+  notifyPrefs     NotificationPreference?
+  auditEvents     AuditEvent[]
+
+  @@index([deletedAt])
+  @@map("users")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING_VERIFICATION
+  DELETED
+}
+
+model Account {
+  id                String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId            String  @db.Uuid
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionToken    String    @unique
+  userId          String    @db.Uuid
+  expires         DateTime
+  ip              String?   @db.Inet
+  userAgent       String?
+  fingerprintHash String?
+  deviceLabel     String?
+  rotatedFrom     String?   @db.Uuid
+  revokedAt       DateTime?
+  revokedReason   String?
+  lastActiveAt    DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([expires])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String   @db.Citext
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+model Authenticator {
+  id            String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId        String            @db.Uuid
+  kind          AuthenticatorKind
+  label         String
+  secretCipher  Bytes?
+  credentialId  String?           @unique
+  publicKey     Bytes?
+  counter       BigInt            @default(0)
+  recoveryCodes String[]
+  createdAt     DateTime          @default(now())
+  lastUsedAt    DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("authenticators")
+}
+
+enum AuthenticatorKind {
+  TOTP
+  WEBAUTHN
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROJECT LAYER
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Project {
+  id                        String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId               String        @db.Uuid
+  ownerId                   String        @db.Uuid
+  name                      String
+  clientLabel               String?
+  description               String?
+  deadline                  DateTime?
+  status                    ProjectStatus @default(ACTIVE)
+  watermarkTemplate         String?
+  allowDownloadDefault      Boolean       @default(false)
+  requireTwoFactorOnApprove Boolean       @default(false)
+  aiSummaryEnabled          Boolean       @default(false)
+  createdAt                 DateTime      @default(now())
+  updatedAt                 DateTime      @updatedAt
+  archivedAt                DateTime?
+
+  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  owner            User              @relation("ProjectOwner", fields: [ownerId], references: [id])
+  members          ProjectMember[]
+  clients          ProjectClient[]
+  assets           Asset[]
+  deliveryPackages DeliveryPackage[]
+  shareLinks       ShareLink[]
+
+  @@index([workspaceId, status])
+  @@index([workspaceId, archivedAt])
+  @@map("projects")
+}
+
+enum ProjectStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+model ProjectMember {
+  projectId String      @db.Uuid
+  userId    String      @db.Uuid
+  role      ProjectRole @default(EDITOR)
+  createdAt DateTime    @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, userId])
+  @@map("project_members")
+}
+
+enum ProjectRole {
+  EDITOR
+  COLLABORATOR
+  VIEWER
+}
+
+model ProjectClient {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId   String    @db.Uuid
+  userId      String    @db.Uuid
+  canDownload Boolean   @default(false)
+  invitedAt   DateTime  @default(now())
+  removedAt   DateTime?
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@index([userId])
+  @@map("project_clients")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ASSET LAYER
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Asset {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId  String    @db.Uuid
+  kind       AssetKind
+  name       String
+  notes      String?
+  createdAt  DateTime  @default(now())
+  archivedAt DateTime?
+
+  project      Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  versions     AssetVersion[]
+  packageItems DeliveryPackageItem[]
+
+  @@index([projectId, archivedAt])
+  @@map("assets")
+}
+
+enum AssetKind {
+  VIDEO
+  PREMIERE_PROJECT
+  AE_PROJECT
+  FONT
+  LUT
+  IMAGE
+  AUDIO_STEM
+  ZIP_PACKAGE
+  DOCUMENT
+  OTHER
+}
+
+model AssetVersion {
+  id                String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  assetId           String        @db.Uuid
+  versionNumber     Int
+  uploadedById      String        @db.Uuid
+  status            VersionStatus @default(PROCESSING)
+  reviewStatus      ReviewStatus  @default(PENDING)
+  originalFilename  String
+  originalSizeBytes BigInt
+  mimeType          String
+  durationMs        Int?
+  width             Int?
+  height            Int?
+  fps               Decimal?      @db.Decimal(7, 3)
+  codec             String?
+  originalKey       String
+  hlsManifestKey    String?
+  spritesheetKey    String?
+  posterKey         String?
+  encryptionKeyId   String?       @db.Uuid
+  contentHashSha256 String?       @db.VarChar(64)
+  allowDownload     Boolean       @default(false)
+  maxDownloads      Int?
+  notes             String?
+  createdAt         DateTime      @default(now())
+  processedAt       DateTime?
+  archivedAt        DateTime?
+
+  asset            Asset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  uploadedBy       User              @relation("UploadedBy", fields: [uploadedById], references: [id])
+  encryptionKey    EncryptionKey?    @relation(fields: [encryptionKeyId], references: [id])
+  renditions       Rendition[]
+  thumbnails       Thumbnail[]
+  diffStrip        DiffStrip?
+  comments         Comment[]
+  markers          Marker[]
+  approvals        Approval[]
+  shareLinks       ShareLink[]
+  playbackSessions PlaybackSession[]
+  downloads        Download[]
+  aiSummaries      AiSummary[]
+  reviewExports    ReviewExport[]
+
+  @@unique([assetId, versionNumber])
+  @@index([assetId, createdAt])
+  @@index([reviewStatus])
+  @@map("asset_versions")
+}
+
+enum VersionStatus {
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum ReviewStatus {
+  PENDING
+  IN_REVIEW
+  CHANGES_REQUESTED
+  APPROVED
+  FINAL
+}
+
+model Rendition {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  assetVersionId String   @db.Uuid
+  label          String
+  height         Int
+  bitrateKbps    Int
+  playlistKey    String
+  segmentCount   Int
+  createdAt      DateTime @default(now())
+
+  assetVersion AssetVersion @relation(fields: [assetVersionId], references: [id], onDelete: Cascade)
+
+  @@unique([assetVersionId, label])
+  @@map("renditions")
+}
+
+model Thumbnail {
+  id             String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  assetVersionId String @db.Uuid
+  timeMs         Int
+  storageKey     String
+
+  assetVersion AssetVersion @relation(fields: [assetVersionId], references: [id], onDelete: Cascade)
+
+  @@index([assetVersionId, timeMs])
+  @@map("thumbnails")
+}
+
+model DiffStrip {
+  id             String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  assetVersionId String @unique @db.Uuid
+  comparedToId   String @db.Uuid
+  storageKey     String
+  sampleCount    Int
+
+  assetVersion AssetVersion @relation(fields: [assetVersionId], references: [id], onDelete: Cascade)
+
+  @@map("diff_strips")
+}
+
+model EncryptionKey {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kekId      String
+  wrappedDek Bytes
+  algorithm  String    @default("AES-128-CBC")
+  rotatedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  assetVersions AssetVersion[]
+
+  @@map("encryption_keys")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REVIEW LAYER
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Comment {
+  id                String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  assetVersionId    String        @db.Uuid
+  parentId          String?       @db.Uuid
+  authorUserId      String?       @db.Uuid
+  authorShareViewId String?       @db.Uuid
+  authorDisplayName String?
+  body              String
+  timeMs            Int
+  frameNumber       Int?
+  status            CommentStatus @default(OPEN)
+  resolvedById      String?       @db.Uuid
+  resolvedAt        DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  editedAt          DateTime?
+  deletedAt         DateTime?
+
+  assetVersion AssetVersion       @relation(fields: [assetVersionId], references: [id], onDelete: Cascade)
+  parent       Comment?           @relation("CommentReplies", fields: [parentId], references: [id])
+  replies      Comment[]          @relation("CommentReplies")
+  author       User?              @relation(fields: [authorUserId], references: [id])
+  drawings     CommentDrawing[]
+  reactions    CommentReaction[]
+
+  @@index([assetVersionId, timeMs])
+  @@index([assetVersionId, status])
+  @@index([parentId])
+  @@map("comments")
+}
+
+enum CommentStatus {
+  OPEN
+  RESOLVED
+}
+
+model CommentDrawing {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  commentId   String   @db.Uuid
+  svgPath     String
+  color       String   @db.VarChar(7)
+  strokeWidth Decimal  @db.Decimal(5, 2)
+  createdAt   DateTime @default(now())
+
+  comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@index([commentId])
+  @@map("comment_drawings")
+}
+
+model CommentReaction {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  commentId String   @db.Uuid
+  userId    String   @db.Uuid
+  emoji     String   @db.VarChar(8)
+  createdAt DateTime @default(now())
+
+  comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([commentId, userId, emoji])
+  @@map("comment_reactions")
+}
+
+model Marker {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  assetVersionId String   @db.Uuid
+  label          String
+  timeMs         Int
+  endTimeMs      Int?
+  color          String?  @db.VarChar(7)
+  createdById    String   @db.Uuid
+  createdAt      DateTime @default(now())
+
+  assetVersion AssetVersion @relation(fields: [assetVersionId], references: [id], onDelete: Cascade)
+
+  @@index([assetVersionId, timeMs])
+  @@map("markers")
+}
+
+model Approval {
+  id                  String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  assetVersionId      String         @db.Uuid
+  approverUserId      String?        @db.Uuid
+  approverShareViewId String?        @db.Uuid
+  approverDisplayName String?
+  status              ApprovalStatus
+  note                String?
+  ip                  String?        @db.Inet
+  userAgent           String?
+  twoFactorVerified   Boolean        @default(false)
+  createdAt           DateTime       @default(now())
+
+  assetVersion AssetVersion @relation(fields: [assetVersionId], references: [id], onDelete: Cascade)
+  approver     User?        @relation(fields: [approverUserId], references: [id])
+
+  @@index([assetVersionId, createdAt])
+  @@map("approvals")
+}
+
+enum ApprovalStatus {
+  APPROVED
+  CHANGES_REQUESTED
+  REJECTED
+}
+
+model AiSummary {
+  id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  assetVersionId    String          @db.Uuid
+  provider          String
+  model             String
+  promptVersion     String
+  inputCommentCount Int
+  cacheKey          String          @unique
+  payload           Json
+  topPriority       String?
+  tokensInput       Int
+  tokensOutput      Int
+  costCents         Int
+  status            AiSummaryStatus @default(READY)
+  error             String?
+  createdAt         DateTime        @default(now())
+  createdById       String?         @db.Uuid
+
+  assetVersion AssetVersion @relation(fields: [assetVersionId], references: [id], onDelete: Cascade)
+
+  @@index([assetVersionId, createdAt])
+  @@map("ai_summaries")
+}
+
+enum AiSummaryStatus {
+  PENDING
+  READY
+  FAILED
+}
+
+model ReviewExport {
+  id               String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  assetVersionId   String       @db.Uuid
+  requestedById    String       @db.Uuid
+  format           ExportFormat @default(PDF)
+  status           ExportStatus @default(QUEUED)
+  storageKey       String?
+  sizeBytes        BigInt?
+  includeResolved  Boolean      @default(true)
+  includeDrawings  Boolean      @default(true)
+  includeAiSummary Boolean      @default(true)
+  error            String?
+  createdAt        DateTime     @default(now())
+  completedAt      DateTime?
+  expiresAt        DateTime?
+
+  assetVersion AssetVersion @relation(fields: [assetVersionId], references: [id], onDelete: Cascade)
+
+  @@index([assetVersionId, createdAt])
+  @@index([status])
+  @@map("review_exports")
+}
+
+enum ExportFormat {
+  PDF
+  JSON
+  CSV
+}
+
+enum ExportStatus {
+  QUEUED
+  RUNNING
+  READY
+  FAILED
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELIVERY LAYER
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ShareLink {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId       String    @db.Uuid
+  projectId         String    @db.Uuid
+  assetVersionId    String?   @db.Uuid
+  publicSlug        String    @unique
+  passwordHash      String?
+  requireEmail      Boolean   @default(false)
+  allowComments     Boolean   @default(true)
+  allowDownload     Boolean   @default(false)
+  expiresAt         DateTime?
+  maxViews          Int?
+  viewCount         Int       @default(0)
+  watermarkTemplate String?
+  createdById       String    @db.Uuid
+  createdAt         DateTime  @default(now())
+  revokedAt         DateTime?
+
+  workspace    Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project      Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assetVersion AssetVersion?   @relation(fields: [assetVersionId], references: [id], onDelete: Cascade)
+  views        ShareLinkView[]
+
+  @@index([projectId, revokedAt])
+  @@index([expiresAt])
+  @@map("share_links")
+}
+
+model ShareLinkView {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  shareLinkId     String    @db.Uuid
+  guestEmail      String?   @db.Citext
+  guestName       String?
+  ip              String?   @db.Inet
+  userAgent       String?
+  fingerprintHash String?
+  viewerTokenHash String    @unique
+  createdAt       DateTime  @default(now())
+  lastSeenAt      DateTime  @default(now())
+  revokedAt       DateTime?
+
+  shareLink ShareLink @relation(fields: [shareLinkId], references: [id], onDelete: Cascade)
+
+  @@index([shareLinkId, createdAt])
+  @@map("share_link_views")
+}
+
+model DeliveryPackage {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId     String    @db.Uuid
+  name          String
+  message       String?
+  createdById   String    @db.Uuid
+  publicSlug    String    @unique
+  passwordHash  String?
+  expiresAt     DateTime?
+  maxDownloads  Int?
+  downloadCount Int       @default(0)
+  createdAt     DateTime  @default(now())
+  revokedAt     DateTime?
+
+  project Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  items   DeliveryPackageItem[]
+
+  @@index([projectId])
+  @@map("delivery_packages")
+}
+
+model DeliveryPackageItem {
+  id             String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  packageId      String  @db.Uuid
+  assetId        String  @db.Uuid
+  assetVersionId String? @db.Uuid
+
+  package DeliveryPackage @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  asset   Asset           @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([packageId, assetId])
+  @@map("delivery_package_items")
+}
+
+model Download {
+  id              String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  assetVersionId  String         @db.Uuid
+  userId          String?        @db.Uuid
+  shareLinkViewId String?        @db.Uuid
+  tokenHash       String         @unique
+  status          DownloadStatus @default(ISSUED)
+  ip              String?        @db.Inet
+  userAgent       String?
+  bytesServed     BigInt         @default(0)
+  approvedById    String?        @db.Uuid
+  issuedAt        DateTime       @default(now())
+  expiresAt       DateTime
+  consumedAt      DateTime?
+
+  assetVersion AssetVersion @relation(fields: [assetVersionId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id])
+
+  @@index([assetVersionId, issuedAt])
+  @@index([expiresAt])
+  @@map("downloads")
+}
+
+enum DownloadStatus {
+  ISSUED
+  CONSUMED
+  EXPIRED
+  REVOKED
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TELEMETRY LAYER
+// ─────────────────────────────────────────────────────────────────────────────
+
+model PlaybackSession {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  assetVersionId       String    @db.Uuid
+  userId               String?   @db.Uuid
+  shareLinkViewId      String?   @db.Uuid
+  sessionTokenHash     String
+  ip                   String?   @db.Inet
+  userAgent            String?
+  fingerprintHash      String?
+  startedAt            DateTime  @default(now())
+  endedAt              DateTime?
+  watchedSeconds       Int       @default(0)
+  completionPct        Decimal?  @db.Decimal(5, 2)
+  qualityChanges       Int       @default(0)
+  seekCount            Int       @default(0)
+  bufferingMs          Int       @default(0)
+  endReason            String?
+  devtoolsDetected     Boolean   @default(false)
+  recordingApiDetected Boolean   @default(false)
+
+  assetVersion AssetVersion @relation(fields: [assetVersionId], references: [id], onDelete: Cascade)
+
+  @@index([assetVersionId, startedAt])
+  @@index([userId, startedAt])
+  @@map("playback_sessions")
+}
+
+model PlaybackEvent {
+  id            String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId     String            @db.Uuid
+  kind          PlaybackEventKind
+  currentTimeMs Int
+  fromTimeMs    Int?
+  toTimeMs      Int?
+  quality       String?
+  createdAt     DateTime          @default(now())
+
+  @@index([sessionId, createdAt])
+  @@index([createdAt])
+  @@map("playback_events")
+}
+
+enum PlaybackEventKind {
+  STARTED
+  PROGRESS
+  PAUSED
+  RESUMED
+  SEEKED
+  QUALITY_CHANGED
+  FINISHED
+  ENDED
+}
+
+model AuditEvent {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId      String?  @db.Uuid
+  actorUserId      String?  @db.Uuid
+  actorShareViewId String?  @db.Uuid
+  action           String
+  targetType       String?
+  targetId         String?  @db.Uuid
+  ip               String?  @db.Inet
+  userAgent        String?
+  metadata         Json?
+  prevHash         String?  @db.VarChar(64)
+  hash             String   @db.VarChar(64)
+  createdAt        DateTime @default(now())
+
+  actor User? @relation(fields: [actorUserId], references: [id])
+
+  @@index([workspaceId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([action, createdAt])
+  @@index([createdAt])
+  @@map("audit_events")
+}
+
+model Notification {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String    @db.Uuid
+  workspaceId String?   @db.Uuid
+  kind        String
+  title       String
+  body        String?
+  link        String?
+  payload     Json?
+  readAt      DateTime?
+  emailedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+model NotificationPreference {
+  userId         String          @id @db.Uuid
+  emailComments  Boolean         @default(true)
+  emailVersions  Boolean         @default(true)
+  emailApprovals Boolean         @default(true)
+  emailDownloads Boolean         @default(true)
+  emailDigest    DigestFrequency @default(OFF)
+  slackWebhook   String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notification_preferences")
+}
+
+enum DigestFrequency {
+  OFF
+  DAILY
+  WEEKLY
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADMIN LAYER
+// ─────────────────────────────────────────────────────────────────────────────
+
+model WorkspaceLimits {
+  workspaceId       String  @id @db.Uuid
+  storageBytesCap   BigInt
+  bandwidthBytesCap BigInt
+  seatsCap          Int
+  aiTokenCap        Int
+  premiumWatermark  Boolean @default(false)
+  drmEnabled        Boolean @default(false)
+  ssoEnabled        Boolean @default(false)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("workspace_limits")
+}
+
+model WorkspaceUsage {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId      String   @db.Uuid
+  day              DateTime @db.Date
+  storageBytes     BigInt   @default(0)
+  egressBytes      BigInt   @default(0)
+  transcodeMinutes Int      @default(0)
+  aiTokensInput    Int      @default(0)
+  aiTokensOutput   Int      @default(0)
+  aiCostCents      Int      @default(0)
+  activeViewers    Int      @default(0)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, day])
+  @@map("workspace_usage")
+}
+
+model FeatureFlag {
+  workspaceId String  @db.Uuid
+  key         String
+  enabled     Boolean @default(false)
+  payload     Json?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@id([workspaceId, key])
+  @@map("feature_flags")
+}

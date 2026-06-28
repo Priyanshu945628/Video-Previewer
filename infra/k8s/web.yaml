@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vsp-web
+  namespace: vsp
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app: vsp-web }
+  template:
+    metadata:
+      labels: { app: vsp-web }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 1001 }
+      containers:
+        - name: web
+          image: ghcr.io/your-org/vsp-web:latest
+          ports: [{ name: http, containerPort: 3000 }]
+          envFrom:
+            - secretRef: { name: vsp-secrets }
+            - configMapRef: { name: vsp-config }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: 500m, memory: 768Mi }
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vsp-web
+  namespace: vsp
+spec:
+  selector: { app: vsp-web }
+  ports: [{ name: http, port: 3000, targetPort: 3000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vsp
+  namespace: vsp
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: '0'  # uploads bypass via R2 directly anyway
+    nginx.ingress.kubernetes.io/proxy-read-timeout: '3600'
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [vsp.app, api.vsp.app]
+      secretName: vsp-tls
+  rules:
+    - host: vsp.app
+      http:
+        paths:
+          - { path: /, pathType: Prefix, backend: { service: { name: vsp-web, port: { number: 3000 } } } }
+    - host: api.vsp.app
+      http:
+        paths:
+          - { path: /,    pathType: Prefix, backend: { service: { name: vsp-api, port: { number: 4000 } } } }
+          - { path: /ws,  pathType: Prefix, backend: { service: { name: vsp-api, port: { number: 4001 } } } }

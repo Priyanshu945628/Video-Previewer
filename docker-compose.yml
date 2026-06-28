@@ -1,0 +1,102 @@
+# Local dev stack — postgres, redis, minio, mailhog, plus the three app services.
+# Run `pnpm dev` against this; the apps mount source for hot-reload.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vsp
+      POSTGRES_PASSWORD: vsp
+      POSTGRES_DB: vsp
+    ports: ['5432:5432']
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U vsp']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    ports: ['6379:6379']
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ['9000:9000', '9001:9001']
+    volumes: [miniodata:/data]
+
+  # Creates the bucket on first boot so the API doesn't error on cold start.
+  minio-bootstrap:
+    image: minio/mc:latest
+    depends_on: [minio]
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin) do sleep 1; done;
+      /usr/bin/mc mb -p local/vsp || true;
+      /usr/bin/mc anonymous set download local/vsp/public || true;
+      exit 0;
+      "
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    ports: ['1025:1025', '8025:8025']
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_started }
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql://vsp:vsp@postgres:5432/vsp
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      SMTP_URL: smtp://mailhog:1025
+    ports: ['4000:4000', '4001:4001']
+
+  workers:
+    build:
+      context: .
+      dockerfile: infra/docker/workers.Dockerfile
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_started }
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql://vsp:vsp@postgres:5432/vsp
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+    depends_on: [api]
+    env_file: [.env]
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:4000
+      INTERNAL_API_URL: http://api:4000
+    ports: ['3000:3000']
+
+volumes:
+  pgdata: {}
+  redisdata: {}
+  miniodata: {}

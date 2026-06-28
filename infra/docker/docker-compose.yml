@@ -1,0 +1,73 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vsp-postgres
+    environment:
+      POSTGRES_USER: vsp
+      POSTGRES_PASSWORD: vsp
+      POSTGRES_DB: vsp
+    ports:
+      - "5432:5432"
+    volumes:
+      - vsp_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vsp -d vsp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: vsp-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - vsp_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: vsp-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: vsp
+      MINIO_ROOT_PASSWORD: vspvspvsp
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - vsp_minio:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 3 &&
+      mc alias set local http://minio:9000 vsp vspvspvsp &&
+      mc mb -p local/vsp-originals || true &&
+      mc mb -p local/vsp-hls || true &&
+      mc mb -p local/vsp-thumbs || true &&
+      mc mb -p local/vsp-exports || true &&
+      echo 'Buckets ready';
+      "
+
+  mailhog:
+    image: mailhog/mailhog
+    container_name: vsp-mailhog
+    ports:
+      - "1025:1025"  # smtp
+      - "8025:8025"  # ui
+
+volumes:
+  vsp_pg:
+  vsp_redis:
+  vsp_minio:

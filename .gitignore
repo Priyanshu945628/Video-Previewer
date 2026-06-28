@@ -1,0 +1,130 @@
+# ─── Dependencies ──────────────────────────────────────────────
+node_modules/
+.pnpm-store/
+.yarn/
+jspm_packages/
+
+# ─── Build output ──────────────────────────────────────────────
+dist/
+build/
+out/
+.next/
+.turbo/
+.cache/
+.swc/
+*.tsbuildinfo
+.tsbuildinfo
+**/.next/
+**/dist/
+
+# Prisma generated client
+packages/db/node_modules/.prisma/
+**/.prisma/
+
+# ─── Tests / coverage ──────────────────────────────────────────
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+tests/e2e/playwright-report/
+tests/e2e/test-results/
+**/*.lcov
+
+# ─── Env / secrets ─────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+!.env.example
+apps/web/.env.local
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+
+# ─── Logs / runtime ────────────────────────────────────────────
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnp.*
+/var/log/vsp/
+/tmp/
+/.local/
+/transcode-work/
+transcode-work/
+
+# ─── OS ────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ─── Editors / IDEs ────────────────────────────────────────────
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+.history/
+.fleet/
+
+# ─── Terraform ─────────────────────────────────────────────────
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+.terraformrc
+terraform.rc
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# ─── Docker ────────────────────────────────────────────────────
+.docker/
+
+# ─── Misc ──────────────────────────────────────────────────────
+.vercel
+.netlify
+.serverless/
+.aws-sam/
+.firebase/
+.eslintcache
+.stylelintcache
+.parcel-cache
+.rollup.cache
+.tmp/
+tmp/
+
+# Large local fixtures (videos, etc.) — keep them out
+fixtures/local/
+*.mp4
+*.mov
+*.mkv
+*.ts
+!packages/**/*.ts
+!apps/**/*.ts
+!tests/**/*.ts
+!**/*.config.ts
+!**/*.test.ts
+
+# Lock files for tooling we don't use here
+package-lock.json
+yarn.lock
