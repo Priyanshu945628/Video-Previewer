@@ -251,27 +251,43 @@ def step_minio() -> None:
         run("chmod +x /usr/local/bin/mc")
     pathlib.Path("/var/lib/minio").mkdir(parents=True, exist_ok=True)
     if not port_open("127.0.0.1", 9000):
+        # MinIO 2024+ refuses to boot with `minioadmin` as the password
+        # (it's a hardcoded denylist for "well-known" credentials). Use a
+        # workspace-unique 16-char one that still matches the secret keys
+        # we'll write into .env below.
+        minio_secret = "minio-vsp-dev-secret-2026"  # noqa: S105 (dev only)
         background(
             "minio",
             "minio server /var/lib/minio --console-address :9001",
-            env={"MINIO_ROOT_USER": "minioadmin", "MINIO_ROOT_PASSWORD": "minioadmin"},
+            env={
+                "MINIO_ROOT_USER": "minioadmin",
+                "MINIO_ROOT_PASSWORD": minio_secret,
+            },
         )
+        # Make sure the .env (and apps/web/.env.local later) match.
+        os.environ["VSP_S3_SECRET"] = minio_secret
         # MinIO is "up" when /minio/health/ready returns 200 AND the port
         # accepts TCP. Belt + suspenders.
-        wait_for(
-            lambda: port_open("127.0.0.1", 9000) and subprocess.run(
-                "curl -fsS -o /dev/null http://127.0.0.1:9000/minio/health/ready",
-                shell=True,
-            ).returncode == 0,
-            timeout=45,
-            every=1,
-            what="minio :9000",
-        )
+        try:
+            wait_for(
+                lambda: port_open("127.0.0.1", 9000) and subprocess.run(
+                    "curl -fsS -o /dev/null http://127.0.0.1:9000/minio/health/ready",
+                    shell=True,
+                ).returncode == 0,
+                timeout=45,
+                every=1,
+                what="minio :9000",
+            )
+        except SystemExit:
+            warn("minio failed to start — its log:")
+            run("tail -n 80 /var/log/vsp/minio.log", check=False)
+            raise
         ok("minio ready")
     else:
         ok("minio already running on :9000")
 
-    run("mc alias set local http://127.0.0.1:9000 minioadmin minioadmin", check=False)
+    minio_secret = os.environ.get("VSP_S3_SECRET", "minio-vsp-dev-secret-2026")
+    run(f"mc alias set local http://127.0.0.1:9000 minioadmin {minio_secret}", check=False)
     for bucket in ("vsp-originals", "vsp-hls", "vsp-thumbs", "vsp-exports"):
         run(f"mc mb -p local/{bucket}", check=False)
 
@@ -352,7 +368,7 @@ def step_env() -> None:
         "S3_ENDPOINT=http://localhost:9000\n"
         "S3_REGION=us-east-1\n"
         "S3_ACCESS_KEY_ID=minioadmin\n"
-        "S3_SECRET_ACCESS_KEY=minioadmin\n"
+        f"S3_SECRET_ACCESS_KEY={os.environ.get('VSP_S3_SECRET', 'minio-vsp-dev-secret-2026')}\n"
         "S3_BUCKET_ORIGINALS=vsp-originals\n"
         "S3_BUCKET_HLS=vsp-hls\n"
         "S3_BUCKET_THUMBS=vsp-thumbs\n"
